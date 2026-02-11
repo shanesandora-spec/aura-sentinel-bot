@@ -9,11 +9,38 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 
+# --- [ НОВЫЕ ИМПОРТЫ ДЛЯ RENDER ] ---
+from flask import Flask
+from threading import Thread
+
 # --- [ НАСТРОЙКИ ] ---
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# --- [ ФЕЙКОВЫЙ СЕРВЕР ДЛЯ ПОДДЕРЖКИ ЖИЗНИ ] ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Aura Sentinel is Online!"
+
+def run_flask():
+    # Render передает порт в переменную окружения PORT
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+# Запускаем сервер перед инициализацией бота
+keep_alive()
+
+# --- [ ДАЛЬШЕ ТВОЙ КОД БОТА ] ---
+# (Тут твои интенты, инициализация бота и т.д.)
 
 # Загружаем ID ролей из переменных окружения
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", 0))
@@ -75,8 +102,8 @@ async def log_ticket_final(channel, closer, opener, t_type):
     file = disnake.File(fp=io.BytesIO(log_text.encode('utf-8')), filename=f"log-{channel.name}.txt")
     await send_log(channel.guild, "Тикет закрыт", f"Тип: **{t_type}**\nОткрыл: {opener.mention}\nЗакрыл: {closer.mention}", color=0xe74c3c, file=file)
 
-# --- [ ИГРОВАЯ ЛОГИКА (Блэкджек) ] ---
-def get_card(): return random.choice([2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11])
+# Словарик для красивого отображения карт (необязательно, но так круче)
+CARD_EMOJIS = {2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟", 11: "🅰️"}
 
 class BlackjackView(disnake.ui.View):
     def __init__(self, inter, bet):
@@ -86,39 +113,74 @@ class BlackjackView(disnake.ui.View):
 
     def get_score(self, hand):
         s = sum(hand)
-        while s > 21 and 11 in hand: hand[hand.index(11)] = 1; s = sum(hand)
+        while s > 21 and 11 in hand:
+            hand[hand.index(11)] = 1
+            s = sum(hand)
         return s
+
+    def format_cards(self, hand, hide_first=False):
+        if hide_first:
+            return f"❓, {CARD_EMOJIS.get(hand[1], hand[1])}"
+        return ", ".join([CARD_EMOJIS.get(c, str(c)) for c in hand])
 
     async def make_emb(self, status="playing"):
         p_s, d_s = self.get_score(self.p_cards), self.get_score(self.d_cards)
-        color = 0x3498db if status == "playing" else (0x2ecc71 if status == "win" else (0xe74c3c if status == "lose" else 0x95a5a6))
-        emb = disnake.Embed(title="🃏 Казино Aura Sentinel", color=color)
-        emb.add_field(name="👤 Ваша рука", value=f"Карты: `{self.p_cards}`\nСчет: **{p_s}**", inline=True)
-        d_val = f"Карты: `[{self.d_cards[0]}, ?]`" if status == "playing" else f"Карты: `{self.d_cards}`\nСчет: **{d_s}**"
+        
+        # Определяем цвет и заголовок
+        colors = {"playing": 0x3498db, "win": 0x2ecc71, "lose": 0xe74c3c, "draw": 0x95a5a6}
+        titles = {"playing": "🃏 Блэкджек: Игра идет...", "win": "🏆 Вы выиграли!", "lose": "💀 Дилер победил", "draw": "🤝 Ничья"}
+        
+        emb = disnake.Embed(title=titles.get(status, "🃏 Казино"), color=colors.get(status, 0x3498db))
+        
+        emb.add_field(name="👤 Ваша рука", value=f"Карты: {self.format_cards(self.p_cards)}\nСчет: **{p_s}**", inline=True)
+        
+        d_val = f"Карты: {self.format_channels(self.d_cards, True)}\nСчет: **?**" if status == "playing" else f"Карты: {self.format_cards(self.d_cards)}\nСчет: **{d_s}**"
         emb.add_field(name="🕵️ Дилер", value=d_val, inline=True)
+        
+        emb.set_footer(text=f"Ставка: {self.bet} {CURR_SYMBOL}")
         return emb
 
-    @disnake.ui.button(label="Еще", style=disnake.ButtonStyle.green, emoji="➕")
-    async def hit(self, b, i):
-        if i.author.id != self.inter.author.id: return
+    @disnake.ui.button(label="Взять еще", style=disnake.ButtonStyle.green, emoji="➕")
+    async def hit(self, button, inter):
+        if inter.author.id != self.inter.author.id:
+            return await inter.send("Это не ваша игра!", ephemeral=True)
+            
         self.p_cards.append(get_card())
-        if self.get_score(self.p_cards) > 21:
-            await update_db(self.inter.author.id, -self.bet)
-            await i.response.edit_message(embed=await self.make_emb("lose"), content=f"💥 **Перебор!** Ты потерял **{self.bet}** {CURR_SYMBOL}", view=None)
-        else: await i.response.edit_message(embed=await self.make_emb())
-
-    @disnake.ui.button(label="Стоп", style=disnake.ButtonStyle.red, emoji="✋")
-    async def stand(self, b, i):
-        if i.author.id != self.inter.author.id: return
-        d_s = self.get_score(self.d_cards)
-        while d_s < 17: self.d_cards.append(get_card()); d_s = self.get_score(self.d_cards)
         p_s = self.get_score(self.p_cards)
+        
+        if p_s > 21:
+            await update_db(self.inter.author.id, -self.bet)
+            await inter.response.edit_message(embed=await self.make_emb("lose"), content=f"💥 **Перебор!** Вы проиграли **{self.bet}** {CURR_SYMBOL}", view=None)
+        elif p_s == 21:
+            # Если ровно 21, автоматически останавливаем
+            await self.stand(button, inter)
+        else:
+            await inter.response.edit_message(embed=await self.make_emb())
+
+    @disnake.ui.button(label="Достаточно", style=disnake.ButtonStyle.red, emoji="✋")
+    async def stand(self, button, inter):
+        if inter.author.id != self.inter.author.id:
+            return await inter.send("Это не ваша игра!", ephemeral=True)
+            
+        d_s = self.get_score(self.d_cards)
+        p_s = self.get_score(self.p_cards)
+        
+        # Дилер добирает до 17
+        while d_s < 17:
+            self.d_cards.append(get_card())
+            d_s = self.get_score(self.d_cards)
+            
         if d_s > 21 or p_s > d_s:
-            win = int((self.bet * 2) * 0.95); await update_db(self.inter.author.id, win - self.bet)
-            msg, st = f"🏆 **Победа!** +{win} {CURR_SYMBOL} (с учетом ком. 5%)", "win"
-        elif p_s == d_s: msg, st = "🤝 **Ничья!** Ставка возвращена.", "draw"
-        else: await update_db(self.inter.author.id, -self.bet); msg, st = f"💀 **Дилер выиграл.** -{self.bet} {CURR_SYMBOL}", "lose"
-        await i.response.edit_message(embed=await self.make_emb(st), content=msg, view=None)
+            win = int((self.bet * 2) * 0.95)
+            await update_db(self.inter.author.id, win - self.bet)
+            msg, st = f"🏆 **Победа!** Ваш выигрыш: **{win}** {CURR_SYMBOL}", "win"
+        elif p_s == d_s:
+            msg, st = "🤝 **Ничья!** Ставка возвращена на баланс.", "draw"
+        else:
+            await update_db(self.inter.author.id, -self.bet)
+            msg, st = f"💀 **Поражение.** Вы потеряли **{self.bet}** {CURR_SYMBOL}", "lose"
+            
+        await inter.response.edit_message(embed=await self.make_emb(st), content=msg, view=None)
 
 # --- [ КОМАНДЫ ЭКОНОМИКИ ] ---
 
@@ -264,41 +326,85 @@ async def blackjack(inter, bet: int):
     v = BlackjackView(inter, bet)
     await inter.send(embed=await v.make_emb(), view=v)
 
-@bot.slash_command(name="roulette", description="🎰 Испытать удачу в рулетке (Комиссия 5%)")
+class RView(disnake.ui.View):
+    def __init__(self, inter, bet):
+        super().__init__(timeout=30)
+        self.inter = inter
+        self.bet = bet
+
+    async def roll(self, inter: disnake.MessageInteraction, chosen_color):
+        if inter.author.id != self.inter.author.id:
+            return await inter.send("❌ Это не ваша игра!", ephemeral=True)
+
+        # Визуальный эффект "вращения"
+        await inter.response.edit_message(content="🎰 Колесо вращается...", view=None)
+        await asyncio.sleep(1.5)
+
+        # Логика шансов
+        # Красное/Черное ~49%, Зеленое - 2% (чуть повысил для интереса)
+        res = random.choices(["red", "black", "green"], weights=[49, 49, 2])[0]
+        
+        color_map = {
+            "red": ("🔴 КРАСНОЕ", 0xe74c3c),
+            "black": ("⚫ ЧЕРНОЕ", 0x2c2f33),
+            "green": ("🟢 ЗЕЛЕНОЕ (ЗЕРО!)", 0x2ecc71)
+        }
+        res_text, res_color = color_map[res]
+
+        emb = disnake.Embed(title="🎰 Результаты рулетки", color=res_color)
+        emb.add_field(name="Выпало:", value=f"**{res_text}**", inline=False)
+
+        if chosen_color == res:
+            multiplier = 35 if res == "green" else 2
+            win = int((self.bet * multiplier) * 0.95) # Комиссия 5%
+            await update_db(self.inter.author.id, win - self.bet)
+            emb.description = f"🎉 Поздравляем! Вы выиграли **{win}** {CURR_SYMBOL}"
+        else:
+            await update_db(self.inter.author.id, -self.bet)
+            emb.description = f"💀 К сожалению, удача не на вашей стороне. Потеряно **{self.bet}** {CURR_SYMBOL}"
+
+        emb.set_footer(text=f"Игрок: {self.inter.author.name} | Ставка: {self.bet}")
+        await inter.edit_original_message(content=None, embed=emb)
+
+    @disnake.ui.button(label="Красное (x2)", style=disnake.ButtonStyle.danger, emoji="🔴")
+    async def red(self, b, i): await self.roll(i, "red")
+
+    @disnake.ui.button(label="Черное (x2)", style=disnake.ButtonStyle.secondary, emoji="⚫")
+    async def black(self, b, i): await self.roll(i, "black")
+
+    @disnake.ui.button(label="Зеленое (x35)", style=disnake.ButtonStyle.success, emoji="🟢")
+    async def green(self, b, i): await self.roll(i, "green")
+
+@bot.slash_command(name="roulette", description="🎰 Испытать удачу в рулетке (Минимум 25 AC)")
 async def roulette(inter, bet: int):
     data = await get_data(inter.author.id)
-    if bet < 10 or data[0] < bet: return await inter.send("❌ Ошибка ставки!", ephemeral=True)
     
-    class RView(disnake.ui.View):
-        def __init__(self, inter, bet):
-            super().__init__(timeout=30)
-            self.inter, self.bet = inter, bet
-        async def roll(self, i, color):
-            if i.author.id != self.inter.author.id: return
-            res = random.choices(["red", "black", "green"], weights=[49.5, 49.5, 1])[0]
-            if color == res:
-                win = int((self.bet * (35 if res == "green" else 2)) * 0.95)
-                await update_db(self.inter.author.id, win - self.bet)
-                m = f"🎉 Выпало **{res.upper()}**! Твой выигрыш: **{win}** {CURR_SYMBOL}"
-            else:
-                await update_db(self.inter.author.id, -self.bet)
-                m = f"💀 Выпало **{res.upper()}**. Ты проиграл **{self.bet}** {CURR_SYMBOL}"
-            await i.response.edit_message(content=m, view=None)
-        @disnake.ui.button(label="Красное", style=disnake.ButtonStyle.danger)
-        async def red(self, b, i): await self.roll(i, "red")
-        @disnake.ui.button(label="Черное", style=disnake.ButtonStyle.secondary)
-        async def black(self, b, i): await self.roll(i, "black")
-        @disnake.ui.button(label="Зеленое", style=disnake.ButtonStyle.success)
-        async def green(self, b, i): await self.roll(i, "green")
+    if bet < 25:
+        return await inter.send("❌ Минимальная ставка в рулетке — **25** AC!", ephemeral=True)
+    
+    if data[0] < bet:
+        return await inter.send("❌ У вас недостаточно Aura Credits на кошельке!", ephemeral=True)
 
-    await inter.send(f"🎰 Ставка: **{bet}** {CURR_SYMBOL}. Выбирай цвет:", view=RView(inter, bet))
+    emb = disnake.Embed(
+        title="🎰 Европейская Рулетка",
+        description=f"Сделайте вашу ставку, выбрав цвет ниже.\n\n💰 Ваша ставка: **{bet}** {CURR_SYMBOL}",
+        color=0xf1c40f
+    )
+    emb.add_field(name="Коэффициенты:", value="🔴 x2 | ⚫ x2 | 🟢 x35", inline=False)
+    emb.set_footer(text="Удачи! Помните о комиссии заведения 5%")
+    
+    await inter.send(embed=emb, view=RView(inter, bet))
 
 @bot.slash_command(name="pay", description="💸 Передать Aura Credits другому игроку")
 async def pay(inter, member: disnake.Member, amount: int):
     data = await get_data(inter.author.id)
-    if member.id == inter.author.id or amount <= 0 or data[0] < amount: 
+    if member.id == inter.author.id: 
+        return await inter.send("❌ Самому себе нельзя перевести деньги!", ephemeral=True)
+    if amount <= 0 or data[0] < amount: 
         return await inter.send("❌ Невозможная сумма или нехватка средств!", ephemeral=True)
-    await update_db(inter.author.id, -amount); await update_db(member.id, amount)
+    
+    await update_db(inter.author.id, -amount)
+    await update_db(member.id, amount)
     await inter.send(f"💸 {inter.author.mention} передал **{amount}** {CURR_SYMBOL} игроку {member.mention}")
 
 @bot.slash_command(name="reward", description="🎁 Получить ежедневный бонус (300 AC)")
@@ -322,5 +428,6 @@ async def on_ready():
     await bot.change_presence(activity=disnake.Game(name="Aura Sentinel"))
     await bot._sync_application_commands()
     print(f"🚀 Aura Sentinel онлайн (Neon DB Connected)!")
+
 
 bot.run(TOKEN)
